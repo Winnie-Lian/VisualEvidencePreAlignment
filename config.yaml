@@ -1,0 +1,116 @@
+
+# 8gpu
+ 
+data:
+  train_files: /groups/g900403/home/share/lyl/alignment/verl-0.6.1/dataset_caption/rl_6k_filtered3/train.parquet
+  val_files: /groups/g900403/home/share/lyl/alignment/verl-0.6.1/dataset_caption/rl_6k_filtered3/val.parquet
+  prompt_key: prompt
+  response_key: response
+  image_key: images
+  max_prompt_length: 4096
+  max_response_length: 1024
+  truncation: right
+    # 只使用前 100 条数据进行训练，快速验证
+  max_samples: 100000
+  
+  train_batch_size: 112
+  val_batch_size: 112
+  shuffle: True
+  trust_remote_code: True
+  sampler: null
+
+actor_rollout_ref:
+  hybrid_engine: True
+  model:
+    path: /groups/g900403/home/share/lyl/models/Qwen2-VL-2B
+    use_remove_padding: True
+    enable_gradient_checkpointing: True
+    trust_remote_code: True
+  actor:
+    strategy: fsdp
+    optim:
+      lr: 1e-6
+      lr_warmup_steps_ratio : 0.05
+    fsdp_config:
+      param_offload: False
+      # optimizer_offload: True
+      optimizer_offload: False
+    use_kl_loss : True
+    kl_loss_coef: 0.01
+    kl_loss_type: mse
+
+    
+    # 3卡对齐参数: 24 (6 batch * 4 n)
+    # ppo_mini_batch_size: 8
+    # ppo_micro_batch_size_per_gpu: 12
+    ppo_mini_batch_size: 112
+    ppo_micro_batch_size_per_gpu: 8
+    use_dynamic_bsz: False
+
+  ref:
+    fsdp_config:
+      # param_offload: True
+      param_offload: False
+    log_prob_micro_batch_size_per_gpu: 64
+  rollout:
+    name: vllm
+    temperature: 0.9
+    n: 4
+    gpu_memory_utilization: 0.6
+    tensor_model_parallel_size: 1
+    log_prob_micro_batch_size: 64
+    enable_chunked_prefill: False
+    max_num_batched_tokens: 16384  
+    engine_kwargs:
+      disable_mm_preprocessor_cache: True
+
+critic:
+  enable: False
+  model:
+    path: /groups/g900403/home/share/lyl/models/Qwen2-VL-2B
+    trust_remote_code: True
+  fsdp_config:
+    param_offload: False
+    optimizer_offload: False
+
+reward_model:
+  enable: False
+  fsdp_config:
+    param_offload: True
+    optimizer_offload: False
+
+algorithm:
+  adv_estimator: grpo
+  # use_ref_model: True
+  # use_kl_in_reward: False
+
+
+trainer:
+  project_name: visual_caption_grpo_0117 # 不改
+  experiment_name: grpo_10k_0120
+  nnodes: 1
+  n_gpus_per_node: 7
+  # resume_from_checkpoint: /groups/g900403/home/share/lyl/alignment/verl-0.6.1/examples/CAPTION_GRPO/results/visual_caption_grpo_1226/qwen2_vl_gqa_1226_1605/global_step_50
+  
+  device: cuda
+  logger: ['console', 'tensorboard','swanlab']
+  
+  # # !!! 2. 存档路径与频率 !!!
+  # # 请确保目录存在
+  # default_local_dir: /data1/lyl/alignment/alignment/verl_alignment/verl/examples/visual_cot_grpo/outputs
+  
+  # 每 5 步保存一次 Checkpoint
+  save_freq: 30
+  save_interval: 70
+  
+  # !!! 3. Epoch !!!
+  total_epochs: 5
+  
+  val_check_interval: 50
+  val_before_train: False
+  test_freq: 50       # 每 50 步验证一次（必须大于 0）
+  val_only: False       # 确保不是只跑验证
+
+ray_kwargs:
+  ray_init:
+    num_cpus: 32
