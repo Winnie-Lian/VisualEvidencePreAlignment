@@ -28,11 +28,9 @@ from auxiliary_worker import VisualAuxiliaryWorker
 
 AUX_MODEL_PATH = "/groups/g900403/home/share/lyl/models/Qwen2.5-7B-Instruct"
 
-# 确保在文件顶部导入这个函数
 try:
     from verl.models.transformers.qwen2_vl import get_rope_index
 except ImportError:
-    # 兼容不同版本的路径
     from verl.utils.model import get_rope_index
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -56,12 +54,8 @@ class Qwen2VLDataset(RLHFDataset):
         # 1. 正常初始化父类
         super().__init__(*args, **kwargs)
         
-        # 2. 定义 Qwen2-VL 专用的视觉模版 (确保 <|vision_start|> 等被正确解析)
-        # 注意：Qwen2-VL 的 Processor 通常自带了正确的 chat_template，
-        # 但为了保险起见（防止被 text-only template 覆盖），我们可以强制指定。
         self.vision_chat_template = r"""{% if messages is string %}{{ messages }}{% else %}{% for message in messages %}{% if 'content' in message %}{% for content in message['content'] %}{% if content['type'] == 'image' or 'image' in content or 'image_url' in content %}<|vision_start|><|image_pad|><|vision_end|>{% elif content['type'] == 'video' or 'video' in content %}<|vision_start|><|video_pad|><|vision_end|>{% elif 'text' in content %}{{ content['text'] }}{% endif %}{% endfor %}{% endif %}{% endfor %}{% endif %}"""
         
-        # 强制覆盖 tokenizer 的 template，确保 apply_chat_template 生成包含特殊 token 的 prompt
         if self.tokenizer:
             self.tokenizer.chat_template = self.vision_chat_template
         if self.processor:
@@ -71,42 +65,30 @@ class Qwen2VLDataset(RLHFDataset):
         self.system_prompt = VISUAL_CAPTION_SYSTEM_PROMPT
 
     def _build_messages(self, example: dict):
-        """
-        重写此方法以适配父类的逻辑，并确保 RewardManager 能拿到 question 和 gt。
-        """
         count = 0
         if not hasattr(self, '_debug_printed'):
-            print(f"\n🔴 [DEBUG] 你的数据列名有哪些: {list(example.keys())}")
-            # 顺便看看有没有像答案的字段内容
+            print(f"\n🔴 [DEBUG]: {list(example.keys())}")
             for k, v in example.items():
-                if isinstance(v, str) and len(v) < 100:  # 打印短字符串看看
+                if isinstance(v, str) and len(v) < 100: 
                     print(f"   -> {k}: {v}")
             self._debug_printed = True
-        # 1. 获取原始数据 (兼容不同列名)
         prompt_key = self.prompt_key if self.prompt_key in example else 'question'
         image_key = self.image_key if self.image_key in example else 'image'
-        # 尝试多种可能的 GT 键名
         gt_key = next((k for k in ['answer', 'ground_truth', 'label','response'] if k in example), None)
         # gt_key = self.gt
         
         question = example.get(prompt_key, "Unknown Question")
         image_path = example.get(image_key, "cant find imagepath")
         gt = example.get(gt_key, "cant get gt")
-
-        # =========================================================
-        # 🚨 核心修复：手动填充 extra_info 🚨
-        # RewardManager 是从这里取数据的，必须显式赋值！
-        # =========================================================
         if 'extra_info' not in example:
             example['extra_info'] = {}
         
-        # 确保键名与 CaptionRewardManager 中的 .get() 对应
         example['extra_info']['question'] = question
         example['extra_info']['ground_truth'] = gt
-        example['extra_info']['answer'] = gt       # 双保险
+        example['extra_info']['answer'] = gt    
         example['extra_info']['image_path'] = image_path
         
-        # 2. 处理图片格式 (Qwen-VL-Utils 要求)
+
         if image_path:
             if isinstance(image_path, str):
                 example[self.image_key] = [{"image": image_path}]
@@ -118,7 +100,6 @@ class Qwen2VLDataset(RLHFDataset):
         else:
             example[self.image_key] = []
 
-        # 3. 构建 Prompt
         messages = [
             {"role": "system", "content": [{"type": "text", "text": self.system_prompt}]},
             {"role": "user", "content": [
@@ -137,8 +118,8 @@ class CaptionRewardManager:
         self.tokenizer = tokenizer
         self.judge_worker = judge_worker
         self.rollout_log_file_path = rollout_log_file_path
-        self.num_samples_per_prompt = num_samples_per_prompt  # 通常是 4
-        self._has_checked_keys = False  # 用于只打印一次调试信息
+        self.num_samples_per_prompt = num_samples_per_prompt 
+        self._has_checked_keys = False 
         
         
         os.makedirs(os.path.dirname(self.rollout_log_file_path), exist_ok=True)
@@ -147,31 +128,25 @@ class CaptionRewardManager:
         print(f"✅ Log file initialized at: {self.rollout_log_file_path}")
 
     def __call__(self, batch, **kwargs):
-        # 1. 解码模型生成的回复
         response_ids = batch.batch['responses']
         captions = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
         
-        # 2. 获取其他信息
         non_tensor = batch.non_tensor_batch
         extra_infos = non_tensor.get('extra_info', [{} for _ in captions])
         reward_models = non_tensor.get('reward_model', [{} for _ in captions])
         batch_images = non_tensor.get('images', [None] * len(captions))
         
-        # --- 修复点 A: 安全获取并检查 prompt_list ---
         prompt_list = non_tensor.get('prompt')
         
-        # 将 numpy array 转为 list，避免 "truth value ambiguous" 错误
         if isinstance(prompt_list, np.ndarray):
             prompt_list = prompt_list.tolist()
             
-        # 如果是 None 或者空列表
         if prompt_list is None or len(prompt_list) == 0:
             if 'prompts' in batch.batch:
                 prompt_list = self.tokenizer.batch_decode(batch.batch['prompts'], skip_special_tokens=True)
             else:
                 prompt_list = ["<Unknown Prompt>"] * len(captions)
         
-        # 确保 prompt_list 是列表且长度匹配
         if isinstance(prompt_list, str):
             prompt_list = [prompt_list] * len(captions)
         
@@ -233,57 +208,7 @@ class CaptionRewardManager:
             prompts_for_judge.append(prompt2)
 
         scores, aux_responses = ray.get(self.judge_worker.compute_rewards.remote(prompts_for_judge, ground_truths))
-        
-        # # 添加 onlie data filtering
-        
-        # # 1. 动态检查 batch 中的键值 (只在第一次运行时检查，避免刷屏)
-        # if not self._has_checked_keys:
-        #     print(f"🔍 [Debug] Batch Keys Available: {list(batch.batch.keys())}")
-        #     self._has_checked_keys = True
-
-        # scores_np = np.array(scores, dtype=np.float32)
-        # total_samples = len(scores_np)
-        # n = self.num_samples_per_prompt
-        
-        # # 确保总数能整除 N
-        # if total_samples % n == 0:
-        #     scores_reshaped = scores_np.reshape(-1, n)
-        #     group_sums = scores_reshaped.sum(axis=1)
-            
-        #     # 策略：过滤掉全 0 的组 (Bad Groups)
-        #     bad_group_indices = np.where(group_sums == 0.0)[0]
-            
-        #     bad_sample_indices = []
-        #     for group_idx in bad_group_indices:
-        #         start_idx = group_idx * n
-        #         bad_sample_indices.extend(range(start_idx, start_idx + n))
-            
-        #     if len(bad_sample_indices) > 0:
-        #         # 转换为 Tensor 索引
-        #         # 注意：batch.batch 中的 Tensor 通常在 GPU 上，这里要小心设备匹配
-        #         # 我们直接操作 tensor，不创建新 tensor 以避免 device 错误
                 
-        #         # A. 核心：修改 response_mask (这是计算 Loss 的关键)
-        #         if 'response_mask' in batch.batch:
-        #             batch.batch['response_mask'][bad_sample_indices] = 0
-                
-        #         # # B. 核心：修改 attention_mask (这是模型 Forward 的关键)
-        #         # if 'attention_mask' in batch.batch:
-        #         #     batch.batch['attention_mask'][bad_sample_indices] = 0
-                    
-        #         # C. 防御性修改：修改 loss_mask (如果存在)
-        #         if 'loss_mask' in batch.batch:
-        #             batch.batch['loss_mask'][bad_sample_indices] = 0
-
-        #         # D. 强制将 Reward 设为 0 (虽然 Loss 没了，但为了 Log 正确)
-        #         # 注意：scores 列表之后会转为 Tensor，这里只影响 Log，不影响 Tensor
-        #         for idx in bad_sample_indices:
-        #             scores[idx] = 0.0
-
-        #         print(f"🧹 [Filter] Masked {len(bad_sample_indices)} samples (All-Zero Groups). "
-        #               f"Indices: {bad_sample_indices[:5]}...")
-        
-        
         try:
             with open(self.rollout_log_file_path, "a", encoding="utf-8") as f:
                 for i in range(len(questions)):
@@ -349,29 +274,14 @@ def maybe_add_ref_policy_worker(config, role_worker_mapping, mapping, ref_policy
         print("[CONFIG] RefPolicy not needed (no KL loss / no KL-in-reward).")
         return
 
-    # Register RefPolicy role
     role_worker_mapping[Role.RefPolicy] = ray.remote(ref_policy_cls)
 
-    # Put it in the same pool you use ("default" in your script)
-    # (Official example uses "global_pool", but you don't have that pool here.)
     mapping[Role.RefPolicy] = mapping.get(Role.ActorRollout, "default")
 
     print("[CONFIG] ✅ Added Role.RefPolicy worker because KL is enabled.")
 
 @hydra.main(config_path=OFFICIAL_CONFIG_PATH, config_name='ppo_trainer', version_base=None)
 def main(base_config: DictConfig):
-    # if not ray.is_initialized():
-    #     ray.init(_temp_dir="/groups/g900403/home/share/lyl/tmp_ray")
-    
-    # cpus = int(os.environ.get("SLURM_CPUS_PER_TASK", "48"))
-    # ray.init(num_cpus=max(1, cpus - 8))
-    # ray.init(num_cpus=48)
-    
-    # cpus = int(os.environ.get("SLURM_CPUS_PER_TASK", "64"))
-    # ray.init(
-    #     _temp_dir=os.environ.get("RAY_TMPDIR", None),
-    #     num_cpus=max(1, cpus - 8),
-    # )
     OUTPUT_DIR = "/groups/g900403/home/share/lyl/alignment/verl-0.6.1/examples/CAPTION_GRPO"
     local_config = OmegaConf.load(os.path.join(CURRENT_DIR, "config.yaml"))
     OmegaConf.set_struct(base_config, False)
@@ -379,7 +289,7 @@ def main(base_config: DictConfig):
     
     default_runtime_env = get_ppo_ray_runtime_env()
     ray_init_kwargs = config.ray_kwargs.get("ray_init", {})
-    ray_init_kwargs["include_dashboard"] = False  # <--- 关键
+    ray_init_kwargs["include_dashboard"] = False  
     runtime_env_kwargs = ray_init_kwargs.get("runtime_env", {})
 
     if config.transfer_queue.enable:
