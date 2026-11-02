@@ -123,7 +123,7 @@ class VisualAuxiliaryWorker:
                 
                 end_idx = idx + len(gt_clean)
                 if end_idx < len(pred_clean) and pred_clean[end_idx].isalpha():
-                    return False )
+                    return False 
 
                 if idx > 0 and pred_clean[idx-1].isalpha():
                     return False 
